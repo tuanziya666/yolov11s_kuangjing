@@ -4,8 +4,10 @@ import warnings
 from pathlib import Path
 
 from ultralytics import YOLO
+from ultralytics.utils import SETTINGS
 
 os.environ.setdefault("WANDB_MODE", "disabled")
+SETTINGS.update(wandb=False, raytune=False)
 
 warnings.filterwarnings("ignore")
 
