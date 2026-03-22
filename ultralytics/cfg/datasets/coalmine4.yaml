@@ -1,0 +1,24 @@
+# Custom coal mine detection dataset in YOLO format
+#
+# Fill in `path` with your dataset root directory. The default structure assumed is:
+# dataset_root/
+#   images/
+#     train/
+#     val/
+#     test/   # optional
+#   labels/
+#     train/
+#     val/
+#     test/   # optional
+
+path: C:\Users\Administrator\Desktop\yolov11s_kuangjing\YOLO_Dataset_25k
+train: images\train
+val: images\val
+test: images\test
+
+
+names:
+  0: chuck
+  1: gripper
+  2: drill_pipe
+  3: coal_miner
