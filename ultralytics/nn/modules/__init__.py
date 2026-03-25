@@ -77,6 +77,7 @@ from .conv import (
 )
 from .ema import EMA
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .msee import C3k2MSEE, EdgeEnhancer, MSEE
 from .transformer import (
     AIFI,
     MLP,
@@ -106,6 +107,8 @@ __all__ = (
     "BiFPNConcat2",
     "BiFPNConcat3",
     "EMA",
+    "EdgeEnhancer",
+    "MSEE",
     "Concat",
     "TransformerLayer",
     "TransformerBlock",
@@ -122,6 +125,7 @@ __all__ = (
     "C2f",
     "C3k2",
     "C3k2Ghost",
+    "C3k2MSEE",
     "SCDown",
     "C2fPSA",
     "C2PSA",

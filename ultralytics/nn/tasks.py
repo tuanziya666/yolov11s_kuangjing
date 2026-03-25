@@ -34,6 +34,7 @@ from ultralytics.nn.modules import (
     C3Ghost,
     C3k2,
     C3k2Ghost,
+    C3k2MSEE,
     C3x,
     CBFuse,
     CBLinear,
@@ -985,6 +986,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2f,
             C3k2,
             C3k2Ghost,
+            C3k2MSEE,
             RepNCSPELAN4,
             ELAN1,
             EMA,
@@ -1020,6 +1022,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2f,
                 C3k2,
                 C3k2Ghost,
+                C3k2MSEE,
                 C2fAttn,
                 C3,
                 C3TR,
@@ -1032,7 +1035,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
-            if m is C3k2 and scale in "mlx":  # for M/L/X sizes
+            if m in {C3k2, C3k2MSEE} and scale in "mlx":  # for M/L/X sizes
                 args[3] = True
         elif m is AIFI:
             args = [ch[f], *args]
