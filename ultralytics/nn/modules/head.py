@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "TDDetect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -159,6 +159,74 @@ class Detect(nn.Module):
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
+
+
+class TaskDecoupleGate(nn.Module):
+    """Lightweight task-specific gating for decoupled classification and regression branches."""
+
+    def __init__(self, c):
+        """Initialize local feature mixing and channel gate generation."""
+        super().__init__()
+        hidden = max(c // 4, 16)
+        self.local = nn.Sequential(DWConv(c, c, 3), Conv(c, c, 1))
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c, hidden, 1),
+            nn.SiLU(),
+            nn.Conv2d(hidden, c, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        """Gate branch-specific features while keeping a residual path."""
+        local = self.local(x)
+        return x + local * self.gate(local)
+
+
+class TDDetect(Detect):
+    """Task-decoupled detection head with separate gated branches for cls and box regression."""
+
+    def __init__(self, nc=80, ch=()):
+        """Initialize branch-specific towers and prediction layers for each detection level."""
+        nn.Module.__init__(self)
+        self.nc = nc
+        self.nl = len(ch)
+        self.reg_max = 16
+        self.no = nc + self.reg_max * 4
+        self.stride = torch.zeros(self.nl)
+
+        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))
+        self.reg_tower = nn.ModuleList(
+            nn.Sequential(Conv(x, c2, 3), TaskDecoupleGate(c2), Conv(c2, c2, 3)) for x in ch
+        )
+        self.cls_tower = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                TaskDecoupleGate(c3),
+                nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+            )
+            for x in ch
+        )
+        self.cv2 = nn.ModuleList(nn.Conv2d(c2, 4 * self.reg_max, 1) for _ in ch)
+        self.cv3 = nn.ModuleList(nn.Conv2d(c3, self.nc, 1) for _ in ch)
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+
+    def forward(self, x):
+        """Run separate gated classification and regression branches before prediction."""
+        for i in range(self.nl):
+            reg = self.cv2[i](self.reg_tower[i](x[i]))
+            cls = self.cv3[i](self.cls_tower[i](x[i]))
+            x[i] = torch.cat((reg, cls), 1)
+        if self.training:
+            return x
+        y = self._inference(x)
+        return y if self.export else (y, x)
+
+    def bias_init(self):
+        """Initialize TDDetect biases following the default detection head scheme."""
+        for reg, cls, s in zip(self.cv2, self.cv3, self.stride):
+            reg.bias.data[:] = 1.0
+            cls.bias.data[: self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
 
 
 class Segment(Detect):

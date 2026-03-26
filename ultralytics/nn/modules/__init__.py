@@ -76,7 +76,7 @@ from .conv import (
     SpatialAttention,
 )
 from .ema import EMA
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
 from .msee import C3k2MSEE, EdgeEnhancer, MSEE
 from .transformer import (
     AIFI,
@@ -138,6 +138,7 @@ __all__ = (
     "BottleneckCSP",
     "Proto",
     "Detect",
+    "TDDetect",
     "Segment",
     "Pose",
     "Classify",
