@@ -76,6 +76,7 @@ from .conv import (
     SpatialAttention,
 )
 from .ema import EMA
+from .fcanet import FcaNet, MultiSpectralAttentionLayer, MultiSpectralDCTLayer
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
 from .msee import C3k2MSEE, EdgeEnhancer, MSEE
 from .transformer import (
@@ -107,6 +108,9 @@ __all__ = (
     "BiFPNConcat2",
     "BiFPNConcat3",
     "EMA",
+    "FcaNet",
+    "MultiSpectralAttentionLayer",
+    "MultiSpectralDCTLayer",
     "EdgeEnhancer",
     "MSEE",
     "Concat",
