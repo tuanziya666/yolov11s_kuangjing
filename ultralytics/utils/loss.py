@@ -29,6 +29,12 @@ def _env_float(name, default):
         return default
 
 
+def _env_str(name, default):
+    """Read a string hyperparameter from the environment."""
+    value = os.getenv(name, default)
+    return default if value is None else str(value).strip().lower()
+
+
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
@@ -114,6 +120,8 @@ class BboxLoss(nn.Module):
         self.use_wciou_acloss = _env_flag("ULTRALYTICS_WCIOU_ACLOSS", False)
         self.wciou_gamma = _env_float("ULTRALYTICS_WCIOU_GAMMA", 2.0)
         self.wciou_lambda = _env_float("ULTRALYTICS_WCIOU_LAMBDA", 0.7)
+        self.iou_type = _env_str("ULTRALYTICS_IOU_LOSS", "ciou")
+        self.inner_iou_ratio = _env_float("ULTRALYTICS_INNER_IOU_RATIO", 0.8)
 
     def forward(
         self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask, pred_scores=None
@@ -132,6 +140,14 @@ class BboxLoss(nn.Module):
                 confidence=confidence,
                 gamma=self.wciou_gamma,
                 loss_lambda=self.wciou_lambda,
+            )
+        elif self.iou_type == "inner_iou":
+            iou = bbox_iou(
+                pred_bboxes[fg_mask],
+                target_bboxes[fg_mask],
+                xywh=False,
+                InnerIoU=True,
+                inner_ratio=self.inner_iou_ratio,
             )
         else:
             iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)

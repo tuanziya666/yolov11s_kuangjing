@@ -71,7 +71,21 @@ def box_iou(box1, box2, eps=1e-7):
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, WCIoU=False, confidence=None, gamma=2.0, loss_lambda=0.7, eps=1e-7):
+def bbox_iou(
+    box1,
+    box2,
+    xywh=True,
+    GIoU=False,
+    DIoU=False,
+    CIoU=False,
+    WCIoU=False,
+    InnerIoU=False,
+    confidence=None,
+    inner_ratio=0.8,
+    gamma=2.0,
+    loss_lambda=0.7,
+    eps=1e-7,
+):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
@@ -83,6 +97,8 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, WCIoU=Fa
         GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
         DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
         CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        InnerIoU (bool, optional): If True, calculate IoU on ratio-scaled inner boxes. Defaults to False.
+        inner_ratio (float, optional): Inner-box scaling ratio used by Inner-IoU. Defaults to 0.8.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
@@ -110,6 +126,21 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, WCIoU=Fa
 
     # IoU
     iou = inter / union
+    if InnerIoU:
+        inner_ratio = max(float(inner_ratio), eps)
+        b1_cx, b1_cy = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+        b2_cx, b2_cy = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+        inner_w1, inner_h1 = w1 * inner_ratio, h1 * inner_ratio
+        inner_w2, inner_h2 = w2 * inner_ratio, h2 * inner_ratio
+        inner_b1_x1, inner_b1_x2 = b1_cx - inner_w1 / 2, b1_cx + inner_w1 / 2
+        inner_b1_y1, inner_b1_y2 = b1_cy - inner_h1 / 2, b1_cy + inner_h1 / 2
+        inner_b2_x1, inner_b2_x2 = b2_cx - inner_w2 / 2, b2_cx + inner_w2 / 2
+        inner_b2_y1, inner_b2_y2 = b2_cy - inner_h2 / 2, b2_cy + inner_h2 / 2
+        inner_inter = (inner_b1_x2.minimum(inner_b2_x2) - inner_b1_x1.maximum(inner_b2_x1)).clamp_(0) * (
+            inner_b1_y2.minimum(inner_b2_y2) - inner_b1_y1.maximum(inner_b2_y1)
+        ).clamp_(0)
+        inner_union = inner_w1 * inner_h1 + inner_w2 * inner_h2 - inner_inter + eps
+        return inner_inter / inner_union
     if CIoU or DIoU or GIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
