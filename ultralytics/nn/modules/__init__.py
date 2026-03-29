@@ -75,6 +75,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
+from .LSKA import C2PSA_LSKA, LSKA, PSABlock_LSKA
 from .ema import EMA
 from .fcanet import FcaNet, MultiSpectralAttentionLayer, MultiSpectralDCTLayer
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
@@ -107,6 +108,9 @@ __all__ = (
     "CBAM",
     "BiFPNConcat2",
     "BiFPNConcat3",
+    "LSKA",
+    "PSABlock_LSKA",
+    "C2PSA_LSKA",
     "EMA",
     "FcaNet",
     "MultiSpectralAttentionLayer",
