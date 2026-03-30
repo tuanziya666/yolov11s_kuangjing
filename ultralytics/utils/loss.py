@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
@@ -33,6 +34,17 @@ def _env_str(name, default):
     """Read a string hyperparameter from the environment."""
     value = os.getenv(name, default)
     return default if value is None else str(value).strip().lower()
+
+
+def _env_float_list(name, default):
+    """Read a comma-separated float list from the environment."""
+    value = os.getenv(name)
+    if value is None:
+        return list(default)
+    try:
+        return [float(x.strip()) for x in str(value).split(",") if x.strip()]
+    except ValueError:
+        return list(default)
 
 
 class VarifocalLoss(nn.Module):
@@ -84,6 +96,43 @@ class FocalLoss(nn.Module):
         return loss.mean(1).sum()
 
 
+class AdaptiveThresholdFocalLoss(nn.Module):
+    """Adaptive Threshold Focal Loss (ATFL) from EFLNet."""
+
+    def __init__(self, loss_fcn, eps=1e-7):
+        """Wrap a BCE-style loss and apply the adaptive threshold modulation elementwise."""
+        super().__init__()
+        self.loss_fcn = loss_fcn
+        self.reduction = loss_fcn.reduction
+        self.loss_fcn.reduction = "none"
+        self.eps = eps
+
+    def forward(self, pred, true):
+        """Compute ATFL with different modulation on the two sides of the 0.5 threshold."""
+        with autocast(enabled=False):
+            pred = pred.float()
+            true = true.float()
+            loss = self.loss_fcn(pred, true)
+            pred_prob = pred.sigmoid()
+            p_t = true * pred_prob + (1 - true) * (1 - pred_prob)
+            mean_pt = p_t.mean().clamp_(self.eps, 1.0)
+            gamma_high = -mean_pt.log()
+            gamma_low = -p_t.clamp_min(self.eps).log()
+
+            modulating_factor = torch.zeros_like(p_t)
+            high_mask = p_t > 0.5
+            low_mask = ~high_mask
+            modulating_factor[high_mask] = (1.000001 - p_t[high_mask]).pow(gamma_high)
+            modulating_factor[low_mask] = (1.5 - p_t[low_mask]).pow(gamma_low[low_mask])
+            loss = loss * modulating_factor
+
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
 class DFLoss(nn.Module):
     """Criterion class for computing DFL losses during training."""
 
@@ -113,7 +162,7 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
+    def __init__(self, reg_max=16, nc=None):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
@@ -122,18 +171,117 @@ class BboxLoss(nn.Module):
         self.wciou_lambda = _env_float("ULTRALYTICS_WCIOU_LAMBDA", 0.7)
         self.iou_type = _env_str("ULTRALYTICS_IOU_LOSS", "ciou")
         self.inner_iou_ratio = _env_float("ULTRALYTICS_INNER_IOU_RATIO", 0.8)
+        self.nwd_tau = _env_float("ULTRALYTICS_NWD_TAU", 12.8)
+        self.box_pos_weights = _env_float_list("ULTRALYTICS_BOX_POS_WEIGHTS", [])
+        self.use_dynamic_box_reweight = _env_flag("ULTRALYTICS_DYNAMIC_BOX_REWEIGHT", False)
+        self.dynamic_box_low_iou = _env_float("ULTRALYTICS_DYNAMIC_BOX_LOW_IOU", 0.5)
+        self.dynamic_box_high_iou = _env_float("ULTRALYTICS_DYNAMIC_BOX_HIGH_IOU", 0.75)
+        self.dynamic_box_low_weight = _env_float("ULTRALYTICS_DYNAMIC_BOX_LOW_WEIGHT", 1.0)
+        self.dynamic_box_mid_weight = _env_float("ULTRALYTICS_DYNAMIC_BOX_MID_WEIGHT", 1.0)
+        self.dynamic_box_high_weight = _env_float("ULTRALYTICS_DYNAMIC_BOX_HIGH_WEIGHT", 2.0)
+        self.use_drillpipe_ratio_loss = _env_flag("ULTRALYTICS_DRILLPIPE_RATIO_LOSS", False)
+        self.drillpipe_ratio_class = int(_env_float("ULTRALYTICS_DRILLPIPE_RATIO_CLASS", 2))
+        self.drillpipe_ratio_weight = _env_float("ULTRALYTICS_DRILLPIPE_RATIO_WEIGHT", 0.5)
+        self.nc = nc
+        if self.box_pos_weights and self.nc is not None:
+            if len(self.box_pos_weights) > self.nc:
+                LOGGER.warning(
+                    f"WARNING ⚠️ ULTRALYTICS_BOX_POS_WEIGHTS length {len(self.box_pos_weights)} exceeds nc={self.nc}. "
+                    "Truncating extra class weights."
+                )
+                self.box_pos_weights = self.box_pos_weights[: self.nc]
+            elif len(self.box_pos_weights) < self.nc:
+                self.box_pos_weights = self.box_pos_weights + [1.0] * (self.nc - len(self.box_pos_weights))
+        self.register_buffer("box_pos_weights_tensor", torch.tensor(self.box_pos_weights, dtype=torch.float32))
+
+    @staticmethod
+    def _axis_free_ratio(boxes, eps=1e-7):
+        """Return orientation-agnostic long/short side ratio for xyxy boxes."""
+        wh = (boxes[..., 2:4] - boxes[..., 0:2]).clamp_min(eps)
+        long_side = wh.max(dim=-1).values
+        short_side = wh.min(dim=-1).values.clamp_min(eps)
+        return long_side / short_side
+
+    @staticmethod
+    def _xyxy_to_xywh(boxes):
+        """Convert xyxy boxes to center-width-height representation."""
+        wh = (boxes[..., 2:4] - boxes[..., 0:2]).clamp_min(1e-7)
+        center = (boxes[..., 0:2] + boxes[..., 2:4]) * 0.5
+        return center, wh
+
+    def _nwd_similarity(self, pred_bboxes, target_bboxes):
+        """
+        Return an NWD-style similarity in [0, 1].
+
+        Boxes are modeled as axis-aligned Gaussians. For diagonal covariance the squared 2-Wasserstein distance
+        simplifies to center-distance plus scale-distance terms.
+        """
+        pred_center, pred_wh = self._xyxy_to_xywh(pred_bboxes)
+        target_center, target_wh = self._xyxy_to_xywh(target_bboxes)
+        center_term = (pred_center - target_center).pow(2).sum(-1, keepdim=True)
+        scale_term = ((pred_wh - target_wh).pow(2).sum(-1, keepdim=True)) / 12.0
+        w2 = (center_term + scale_term).clamp_min(1e-9).sqrt()
+        return torch.exp(-w2 / max(self.nwd_tau, 1e-6))
+
+    def _dynamic_box_multiplier(self, quality):
+        """Return a piecewise dynamic regression weight from localization quality."""
+        if not self.use_dynamic_box_reweight:
+            return torch.ones_like(quality)
+
+        low_thr = min(self.dynamic_box_low_iou, self.dynamic_box_high_iou)
+        high_thr = max(self.dynamic_box_low_iou, self.dynamic_box_high_iou)
+        out = torch.full_like(quality, self.dynamic_box_low_weight)
+        out = torch.where(quality > low_thr, torch.full_like(out, self.dynamic_box_mid_weight), out)
+        out = torch.where(quality > high_thr, torch.full_like(out, self.dynamic_box_high_weight), out)
+        return out
+
+    def _drillpipe_ratio_penalty(self, pred_bboxes_pos, target_bboxes_pos, target_scores_pos, weight, target_scores_sum):
+        """Apply a drill_pipe-only aspect-ratio consistency penalty on positive samples."""
+        if not self.use_drillpipe_ratio_loss or self.nc is None or target_scores_pos.numel() == 0:
+            return pred_bboxes_pos.new_tensor(0.0)
+
+        target_cls = target_scores_pos.argmax(dim=-1)
+        drill_mask = target_cls == self.drillpipe_ratio_class
+        if not drill_mask.any():
+            return pred_bboxes_pos.new_tensor(0.0)
+
+        pred_ratio = self._axis_free_ratio(pred_bboxes_pos[drill_mask])
+        target_ratio = self._axis_free_ratio(target_bboxes_pos[drill_mask])
+        ratio_error = (pred_ratio.log() - target_ratio.log()).abs().unsqueeze(-1)
+        ratio_weight = weight[drill_mask]
+        return self.drillpipe_ratio_weight * (ratio_error * ratio_weight).sum() / target_scores_sum
+
+    def _positive_box_weight(self, target_scores, fg_mask):
+        """Return per-positive regression weights, optionally reweighted by class."""
+        return self._positive_box_weight_from_scores(target_scores[fg_mask])
+
+    def _positive_box_weight_from_scores(self, target_scores_pos):
+        """Return per-positive regression weights from already-selected positive scores."""
+        weight = target_scores_pos.sum(-1, keepdim=True)
+        if self.box_pos_weights_tensor.numel() == 0:
+            return weight
+
+        box_pos_weights = self.box_pos_weights_tensor.to(device=target_scores_pos.device, dtype=target_scores_pos.dtype)
+        if box_pos_weights.numel() < target_scores_pos.shape[-1]:
+            box_pos_weights = F.pad(box_pos_weights, (0, target_scores_pos.shape[-1] - box_pos_weights.numel()), value=1.0)
+        elif box_pos_weights.numel() > target_scores_pos.shape[-1]:
+            box_pos_weights = box_pos_weights[: target_scores_pos.shape[-1]]
+        return (target_scores_pos * box_pos_weights.view(1, -1)).sum(-1, keepdim=True)
 
     def forward(
         self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask, pred_scores=None
     ):
         """IoU loss."""
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        pred_bboxes_pos = pred_bboxes[fg_mask]
+        target_bboxes_pos = target_bboxes[fg_mask]
+        target_scores_pos = target_scores[fg_mask]
+        weight = self._positive_box_weight_from_scores(target_scores_pos)
         if self.use_wciou_acloss and pred_scores is not None:
             pred_conf = pred_scores[fg_mask].sigmoid()
-            confidence = (pred_conf * target_scores[fg_mask]).sum(-1, keepdim=True) / weight.clamp_min(1e-7)
+            confidence = (pred_conf * target_scores_pos).sum(-1, keepdim=True) / weight.clamp_min(1e-7)
             iou = bbox_iou(
-                pred_bboxes[fg_mask],
-                target_bboxes[fg_mask],
+                pred_bboxes_pos,
+                target_bboxes_pos,
                 xywh=False,
                 CIoU=True,
                 WCIoU=True,
@@ -141,17 +289,25 @@ class BboxLoss(nn.Module):
                 gamma=self.wciou_gamma,
                 loss_lambda=self.wciou_lambda,
             )
+        elif self.iou_type == "mpdiou":
+            iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, MPDIoU=True)
         elif self.iou_type == "inner_iou":
             iou = bbox_iou(
-                pred_bboxes[fg_mask],
-                target_bboxes[fg_mask],
+                pred_bboxes_pos,
+                target_bboxes_pos,
                 xywh=False,
                 InnerIoU=True,
                 inner_ratio=self.inner_iou_ratio,
             )
+        elif self.iou_type == "nwd":
+            iou = self._nwd_similarity(pred_bboxes_pos, target_bboxes_pos)
         else:
-            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+            iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
+        weight = weight * self._dynamic_box_multiplier(iou.detach())
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        loss_iou += self._drillpipe_ratio_penalty(
+            pred_bboxes_pos, target_bboxes_pos, target_scores_pos, weight, target_scores_sum
+        )
 
         # DFL loss
         if self.dfl_loss:
@@ -173,7 +329,7 @@ class RotatedBboxLoss(BboxLoss):
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        weight = self._positive_box_weight(target_scores, fg_mask)
         iou = probiou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
@@ -225,8 +381,22 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, nc=self.nc).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+        self.cls_loss_type = _env_str("ULTRALYTICS_CLS_LOSS", "bce")
+        self.cls_loss_fcn = AdaptiveThresholdFocalLoss(self.bce) if self.cls_loss_type == "atfl" else self.bce
+        self.cls_pos_weights = torch.ones(self.nc, device=device)
+        cls_pos_weights = _env_float_list("ULTRALYTICS_CLS_POS_WEIGHTS", [])
+        if cls_pos_weights:
+            if len(cls_pos_weights) > self.nc:
+                LOGGER.warning(
+                    f"WARNING ⚠️ ULTRALYTICS_CLS_POS_WEIGHTS length {len(cls_pos_weights)} exceeds nc={self.nc}. "
+                    "Truncating extra class weights."
+                )
+                cls_pos_weights = cls_pos_weights[: self.nc]
+            elif len(cls_pos_weights) < self.nc:
+                cls_pos_weights = cls_pos_weights + [1.0] * (self.nc - len(cls_pos_weights))
+            self.cls_pos_weights = torch.tensor(cls_pos_weights, device=device, dtype=torch.float)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
@@ -296,7 +466,12 @@ class v8DetectionLoss:
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        cls_target = target_scores.to(dtype)
+        cls_loss = self.cls_loss_fcn(pred_scores, cls_target)
+        if not torch.allclose(self.cls_pos_weights, torch.ones_like(self.cls_pos_weights)):
+            cls_scale = 1.0 + (self.cls_pos_weights.view(1, 1, -1).type(dtype) - 1.0) * cls_target
+            cls_loss = cls_loss * cls_scale
+        loss[1] = cls_loss.sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
@@ -669,7 +844,7 @@ class v8OBBLoss(v8DetectionLoss):
         """Initializes v8OBBLoss with model, assigner, and rotated bbox loss; note model must be de-paralleled."""
         super().__init__(model)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = RotatedBboxLoss(self.reg_max).to(self.device)
+        self.bbox_loss = RotatedBboxLoss(self.reg_max, nc=self.nc).to(self.device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
