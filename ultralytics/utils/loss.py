@@ -172,6 +172,7 @@ class BboxLoss(nn.Module):
         self.iou_type = _env_str("ULTRALYTICS_IOU_LOSS", "ciou")
         self.inner_iou_ratio = _env_float("ULTRALYTICS_INNER_IOU_RATIO", 0.8)
         self.nwd_tau = _env_float("ULTRALYTICS_NWD_TAU", 12.8)
+        self.shape_iou_scale = _env_float("ULTRALYTICS_SHAPE_IOU_SCALE", 0.5)
         self.box_pos_weights = _env_float_list("ULTRALYTICS_BOX_POS_WEIGHTS", [])
         self.use_dynamic_box_reweight = _env_flag("ULTRALYTICS_DYNAMIC_BOX_REWEIGHT", False)
         self.dynamic_box_low_iou = _env_float("ULTRALYTICS_DYNAMIC_BOX_LOW_IOU", 0.5)
@@ -223,6 +224,47 @@ class BboxLoss(nn.Module):
         w2 = (center_term + scale_term).clamp_min(1e-9).sqrt()
         return torch.exp(-w2 / max(self.nwd_tau, 1e-6))
 
+    def _shape_iou_similarity(self, pred_bboxes, target_bboxes, eps=1e-7):
+        """
+        Return Shape-IoU similarity.
+
+        This follows the common Shape-IoU formulation that augments IoU with
+        shape-aware center distance and width/height consistency penalties.
+        """
+        b1_x1, b1_y1, b1_x2, b1_y2 = pred_bboxes.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = target_bboxes.chunk(4, -1)
+
+        w1 = (b1_x2 - b1_x1).clamp_min(eps)
+        h1 = (b1_y2 - b1_y1).clamp_min(eps)
+        w2 = (b2_x2 - b2_x1).clamp_min(eps)
+        h2 = (b2_y2 - b2_y1).clamp_min(eps)
+
+        inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
+            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
+        ).clamp_(0)
+        union = w1 * h1 + w2 * h2 - inter + eps
+        iou = inter / union
+
+        scale = max(self.shape_iou_scale, 0.0)
+        w2_scale = w2.pow(scale)
+        h2_scale = h2.pow(scale)
+        denom = (w2_scale + h2_scale).clamp_min(eps)
+        ww = 2.0 * w2_scale / denom
+        hh = 2.0 * h2_scale / denom
+
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
+        c2 = cw.pow(2) + ch.pow(2) + eps
+
+        center_distance_x = ((b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2)) * 0.25
+        center_distance_y = ((b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)) * 0.25
+        distance_cost = (hh * center_distance_x + ww * center_distance_y) / c2
+
+        omega_w = hh * (w1 - w2).abs() / torch.maximum(w1, w2)
+        omega_h = ww * (h1 - h2).abs() / torch.maximum(h1, h2)
+        shape_cost = (1.0 - torch.exp(-omega_w)).pow(4) + (1.0 - torch.exp(-omega_h)).pow(4)
+
+        return iou - 0.5 * (distance_cost + shape_cost)
     def _dynamic_box_multiplier(self, quality):
         """Return a piecewise dynamic regression weight from localization quality."""
         if not self.use_dynamic_box_reweight:
@@ -301,6 +343,8 @@ class BboxLoss(nn.Module):
             )
         elif self.iou_type == "nwd":
             iou = self._nwd_similarity(pred_bboxes_pos, target_bboxes_pos)
+        elif self.iou_type == "shape_iou":
+            iou = self._shape_iou_similarity(pred_bboxes_pos, target_bboxes_pos)
         else:
             iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
         weight = weight * self._dynamic_box_multiplier(iou.detach())
