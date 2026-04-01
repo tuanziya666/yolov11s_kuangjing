@@ -6,6 +6,8 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+
+
 import torch
 import torch.nn as nn
 
@@ -34,6 +36,7 @@ from ultralytics.nn.modules import (
     C2fCIB,
     C2fPSA,
     C3Ghost,
+    C3k2DSConv,
     C3k2,
     C3k2Ghost,
     C3k2MSEE,
@@ -48,6 +51,7 @@ from ultralytics.nn.modules import (
     Conv2,
     ConvTranspose,
     Detect,
+    DyDetect,
     TDDetect,
     DWConv,
     DWConvTranspose2d,
@@ -57,6 +61,7 @@ from ultralytics.nn.modules import (
     HGBlock,
     HGStem,
     ImagePoolingAttn,
+    LSCCM,
     Pose,
     RepC3,
     RepConv,
@@ -65,7 +70,15 @@ from ultralytics.nn.modules import (
     ResNetLayer,
     RTDETRDecoder,
     SCDown,
+    SFEM,
+    SPDConv,
+    SPDGFDown,
     Segment,
+    SpaceToDepth,
+    DSConv,
+    GFBlock,
+    GlobalFilter,
+    WFU,
     WorldDetect,
     v10Detect,
 )
@@ -982,12 +995,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fPSA,
             C2PSA,
             C2PSA_LSKA,
+            LSCCM,
             DWConv,
             Focus,
             BottleneckCSP,
             C1,
             C2,
             C2f,
+            C3k2DSConv,
             C3k2,
             C3k2Ghost,
             C3k2MSEE,
@@ -1001,6 +1016,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3,
             C3TR,
             C3Ghost,
+            SPDConv,
+            SPDGFDown,
             nn.ConvTranspose2d,
             DWConvTranspose2d,
             C3x,
@@ -1008,6 +1025,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             PSA,
             SCDown,
             C2fCIB,
+            GFBlock,
+            GlobalFilter,
+            DSConv,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1024,6 +1044,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C1,
                 C2,
                 C2f,
+                C3k2DSConv,
                 C3k2,
                 C3k2Ghost,
                 C3k2MSEE,
@@ -1040,13 +1061,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
-            if m in {C3k2, C3k2MSEE} and scale in "mlx":  # for M/L/X sizes
+            if m in {C3k2, C3k2MSEE, C3k2DSConv} and scale in "mlx":  # for M/L/X sizes
                 args[3] = True
         elif m is AIFI:
             args = [ch[f], *args]
         elif m is FcaNet:
             c2 = ch[f]
             args = [c2, *args]
+        elif m is SFEM:
+            c2 = ch[f]
+            args = [c2]
+        elif m is WFU:
+            c1 = [ch[x] for x in f]
+            c2 = c1[0]
+            args = [c1]
         elif m in {HGStem, HGBlock}:
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
@@ -1059,7 +1087,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m in {Concat, BiFPNConcat2, BiFPNConcat3}:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect, TDDetect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
+        elif m in {Detect, DyDetect, TDDetect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)

@@ -75,11 +75,15 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .LSKA import C2PSA_LSKA, LSKA, PSABlock_LSKA
 from .ema import EMA
 from .fcanet import FcaNet, MultiSpectralAttentionLayer, MultiSpectralDCTLayer
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
+from .head import Classify, Detect, DyDetect, OBB, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
+from .LSKA import C2PSA_LSKA, LSKA, PSABlock_LSKA
+from .lsccm import LSCCM
 from .msee import C3k2MSEE, EdgeEnhancer, MSEE
+from .sfem import HaarDWT, HaarIDWT, SFEM
+from .spdgf_ds import C3k2DSConv, DSConv, GFBlock, GlobalFilter, SPDConv, SPDGFDown, SpaceToDepth
+from .wfu import HaarWavelet, WFU
 from .transformer import (
     AIFI,
     MLP,
@@ -108,15 +112,27 @@ __all__ = (
     "CBAM",
     "BiFPNConcat2",
     "BiFPNConcat3",
-    "LSKA",
-    "PSABlock_LSKA",
-    "C2PSA_LSKA",
     "EMA",
     "FcaNet",
     "MultiSpectralAttentionLayer",
     "MultiSpectralDCTLayer",
+    "LSKA",
+    "PSABlock_LSKA",
+    "C2PSA_LSKA",
+    "LSCCM",
     "EdgeEnhancer",
     "MSEE",
+    "HaarDWT",
+    "HaarIDWT",
+    "SFEM",
+    "HaarWavelet",
+    "WFU",
+    "SpaceToDepth",
+    "SPDConv",
+    "GlobalFilter",
+    "GFBlock",
+    "SPDGFDown",
+    "DSConv",
     "Concat",
     "TransformerLayer",
     "TransformerBlock",
@@ -134,6 +150,7 @@ __all__ = (
     "C3k2",
     "C3k2Ghost",
     "C3k2MSEE",
+    "C3k2DSConv",
     "SCDown",
     "C2fPSA",
     "C2PSA",
@@ -146,6 +163,7 @@ __all__ = (
     "BottleneckCSP",
     "Proto",
     "Detect",
+    "DyDetect",
     "TDDetect",
     "Segment",
     "Pose",
