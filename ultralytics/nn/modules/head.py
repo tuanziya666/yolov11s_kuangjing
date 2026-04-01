@@ -6,6 +6,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
@@ -15,7 +16,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "TDDetect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "DyDetect", "TDDetect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -159,6 +160,89 @@ class Detect(nn.Module):
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
+
+
+class DyHeadBlock(nn.Module):
+    """A lightweight DyHead-style block with scale, spatial, and task-aware fusion."""
+
+    def __init__(self, c):
+        """Initialize a DyHead-style block for same-width pyramid features."""
+        super().__init__()
+        self.cur_conv = Conv(c, c, 3)
+        self.high_conv = Conv(c, c, 3)
+        self.low_conv = Conv(c, c, 3)
+        self.scale_attn = nn.Conv2d(c * 3, 3, 1)
+        self.spatial_attn = nn.Sequential(DWConv(c, c, 3), nn.Conv2d(c, 1, 1), nn.Sigmoid())
+        hidden = max(c // 4, 16)
+        self.task_attn = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c, hidden, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c, 1),
+            nn.Sigmoid(),
+        )
+        self.out_conv = Conv(c, c, 3)
+
+    def forward(self, feats):
+        """Fuse neighboring pyramid features with dynamic scale weights and task/spatial gating."""
+        outs = []
+        nl = len(feats)
+        for i, x in enumerate(feats):
+            current = self.cur_conv(x)
+            high = (
+                F.adaptive_avg_pool2d(self.high_conv(feats[i - 1]), x.shape[-2:])
+                if i > 0
+                else torch.zeros_like(current)
+            )
+            low = (
+                F.interpolate(self.low_conv(feats[i + 1]), size=x.shape[-2:], mode="nearest")
+                if i + 1 < nl
+                else torch.zeros_like(current)
+            )
+            branches = torch.stack((current, high, low), dim=1)
+            pooled = torch.cat([branch.mean((2, 3), keepdim=True) for branch in (current, high, low)], 1)
+            weights = self.scale_attn(pooled).softmax(1).unsqueeze(2)
+            fused = (branches * weights).sum(1)
+            fused = fused * self.spatial_attn(fused)
+            fused = fused * self.task_attn(fused)
+            outs.append(self.out_conv(fused) + x)
+        return outs
+
+
+class DyDetect(Detect):
+    """YOLO detection head with a lightweight DyHead-style dynamic feature tower."""
+
+    def __init__(self, nc=80, num_blocks=1, ch=()):
+        """Initialize DyDetect with DyHead-style fusion blocks followed by decoupled predictors."""
+        nn.Module.__init__(self)
+        self.nc = nc
+        self.nl = len(ch)
+        self.reg_max = 16
+        self.no = nc + self.reg_max * 4
+        self.stride = torch.zeros(self.nl)
+        self.hidden_dim = min(ch)
+        self.input_proj = nn.ModuleList(Conv(c, self.hidden_dim, 1) for c in ch)
+        self.dyhead = nn.ModuleList(DyHeadBlock(self.hidden_dim) for _ in range(max(num_blocks, 1)))
+        self.cv2 = nn.ModuleList(nn.Conv2d(self.hidden_dim, 4 * self.reg_max, 1) for _ in ch)
+        self.cv3 = nn.ModuleList(nn.Conv2d(self.hidden_dim, self.nc, 1) for _ in ch)
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+
+    def forward(self, x):
+        """Run DyHead-style feature fusion before classification and regression prediction."""
+        x = [proj(feat) for proj, feat in zip(self.input_proj, x)]
+        for block in self.dyhead:
+            x = block(x)
+        x = [torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1) for i in range(self.nl)]
+        if self.training:
+            return x
+        y = self._inference(x)
+        return y if self.export else (y, x)
+
+    def bias_init(self):
+        """Initialize DyDetect biases, matching the Detect head initialization scheme."""
+        for reg, cls, s in zip(self.cv2, self.cv3, self.stride):
+            reg.bias.data[:] = 1.0
+            cls.bias.data[: self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
 
 
 class TaskDecoupleGate(nn.Module):
