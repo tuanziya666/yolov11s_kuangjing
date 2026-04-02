@@ -58,6 +58,7 @@ from .block import (
     ResNetLayer,
     SCDown,
 )
+from .akconv import AKConv, Bottleneck_AKConv, C3k_AKConv, C3k2_AKConv
 from .conv import (
     CBAM,
     BiFPNConcat2,
@@ -75,11 +76,14 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
+from .dysample import DySample
 from .ema import EMA
 from .fcanet import FcaNet, MultiSpectralAttentionLayer, MultiSpectralDCTLayer
 from .head import Classify, Detect, DyDetect, OBB, Pose, RTDETRDecoder, Segment, TDDetect, WorldDetect, v10Detect
+from .illum_dwt import AIE, DWTDown
 from .LSKA import C2PSA_LSKA, LSKA, PSABlock_LSKA
 from .lsccm import LSCCM
+from .masa import MaSA
 from .msee import C3k2MSEE, EdgeEnhancer, MSEE
 from .sfem import HaarDWT, HaarIDWT, SFEM
 from .spdgf_ds import C3k2DSConv, DSConv, GFBlock, GlobalFilter, SPDConv, SPDGFDown, SpaceToDepth
@@ -98,6 +102,10 @@ from .transformer import (
 )
 
 __all__ = (
+    "AKConv",
+    "Bottleneck_AKConv",
+    "C3k_AKConv",
+    "C3k2_AKConv",
     "Conv",
     "Conv2",
     "LightConv",
@@ -112,14 +120,18 @@ __all__ = (
     "CBAM",
     "BiFPNConcat2",
     "BiFPNConcat3",
+    "DySample",
     "EMA",
     "FcaNet",
     "MultiSpectralAttentionLayer",
     "MultiSpectralDCTLayer",
+    "AIE",
+    "DWTDown",
     "LSKA",
     "PSABlock_LSKA",
     "C2PSA_LSKA",
     "LSCCM",
+    "MaSA",
     "EdgeEnhancer",
     "MSEE",
     "HaarDWT",
