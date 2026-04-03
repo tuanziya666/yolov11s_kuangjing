@@ -51,10 +51,13 @@ from ultralytics.nn.modules import (
     Classify,
     BiFPNConcat2,
     BiFPNConcat3,
+    CARAFE,
+    ChannelAttention_HSFPN,
     Concat,
     Conv,
     Conv2,
     ConvTranspose,
+    DECM,
     Detect,
     DySample,
     DyDetect,
@@ -69,6 +72,8 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     LSCCM,
     MaSA,
+    MineLGL,
+    Multiply,
     Pose,
     RepC3,
     RepConv,
@@ -89,6 +94,7 @@ from ultralytics.nn.modules import (
     WFU,
     WorldDetect,
     v10Detect,
+    Add,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -997,6 +1003,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ConvTranspose,
             GhostConv,
             AKConv,
+            DECM,
             Bottleneck,
             Bottleneck_AKConv,
             GhostBottleneck,
@@ -1008,6 +1015,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2PSA_LSKA,
             LSCCM,
             MaSA,
+            MineLGL,
             DWConv,
             Focus,
             BottleneckCSP,
@@ -1080,9 +1088,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
             if m in {C3k2, C3k2_AKConv, C3k2MSEE, C3k2DSConv} and scale in "mlx":  # for M/L/X sizes
                 args[3] = True
-        elif m is DySample:
+        elif m in {DySample, CARAFE, ChannelAttention_HSFPN}:
             c2 = ch[f]
             args = [c2, *args]
+        elif m is Multiply:
+            c2 = ch[f[0]]
+        elif m is Add:
+            c2 = ch[f[-1]]
         elif m is AIFI:
             args = [ch[f], *args]
         elif m is FcaNet:
